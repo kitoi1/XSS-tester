@@ -1,1 +1,11 @@
+[
+    {
+        "url": "http://testsite.com/search?q=",
+        "expected": "alert('XSS')"
+    },
+    {
+        "url": "http://vulnerable.com/comment?name=",
+        "expected": "alert('XSS')"
+    }
+]
 
