@@ -1,22 +1,19 @@
 import requests
 from requests.exceptions import RequestException, Timeout, ConnectionError
-import threading
-import tkinter as tk
-from tkinter import scrolledtext, messagebox, ttk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import re
-from urllib.parse import urljoin, urlparse
-import json
+from urllib.parse import urlparse
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import queue
 import random
 import string
 import hashlib
 import html
+import argparse
+import sys
 
 class KasauXSSAdvancedTester:
-    def __init__(self, url, params, payloads=None, output_widget=None, progress_callback=None):
+    def __init__(self, url, params, payloads=None, workers=15, timeout=8):
         self.url = url
         self.params = params
         self.payloads = payloads or self.get_optimized_payloads()
@@ -30,20 +27,17 @@ class KasauXSSAdvancedTester:
             "X-Scanner": "KasauXSS"
         }
         self.vulnerabilities = []
-        self.output_widget = output_widget
-        self.progress_callback = progress_callback
-        self.lock = threading.Lock()
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         self.total_tests = 0
         self.completed_tests = 0
-        self.test_queue = queue.Queue()
         self.unique_identifier = self.generate_unique_id()
-        self.timeout = 8
-        self.max_workers = 15  # Optimal balance between speed and resource usage
-        self.fingerprints = set()
+        self.timeout = timeout
+        self.max_workers = workers
         self.base_response = None
         self.base_fingerprint = None
+        self.start_time = None
+        self.print_lock = threading.Lock()
 
     def generate_unique_id(self):
         """Generate a unique identifier for this test session"""
@@ -106,12 +100,7 @@ class KasauXSSAdvancedTester:
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         formatted_message = f"[{timestamp}] {message}"
         
-        if self.output_widget:
-            self.output_widget.config(state='normal')
-            self.output_widget.insert(tk.END, formatted_message + "\n")
-            self.output_widget.see(tk.END)
-            self.output_widget.config(state='disabled')
-        else:
+        with self.print_lock:
             if color:
                 print(f"{color}{formatted_message}\033[0m")
             else:
@@ -235,7 +224,7 @@ class KasauXSSAdvancedTester:
                         'status_code': response.status_code
                     }
                     
-                    with self.lock:
+                    with self.print_lock:
                         self.vulnerabilities.append(vulnerability_info)
                         self.log(f"\033[91m[!] POTENTIAL XSS in {param} ({reflection_type})\033[0m", "\033[91m")
                         self.log(f"     Payload: {payload[:100]}{'...' if len(payload) > 100 else ''}")
@@ -260,32 +249,13 @@ class KasauXSSAdvancedTester:
             self.log(f"  [!] Request failed for '{param}': {str(e)[:100]}")
         except Exception as e:
             self.log(f"  [!] Unexpected error testing '{param}': {str(e)}")
-        
-        finally:
-            with self.lock:
-                self.completed_tests += 1
-                if self.progress_callback:
-                    progress = (self.completed_tests / self.total_tests) * 100
-                    self.progress_callback(progress)
-
-    def worker(self):
-        """Worker thread for processing test queue"""
-        while True:
-            try:
-                param, payload = self.test_queue.get(timeout=1)
-                self.test_param_payload(param, payload)
-                self.test_queue.task_done()
-            except queue.Empty:
-                break
-            except Exception as e:
-                self.log(f"Worker error: {str(e)}")
-                continue
 
     def run_tests(self):
         """Optimized test execution with thread pooling"""
         self.vulnerabilities.clear()
         self.completed_tests = 0
         self.total_tests = len(self.params) * len(self.payloads)
+        self.start_time = time.time()
         
         self.log("="*80)
         self.log("KASAU XSS ADVANCED PENETRATION TESTING TOOL v3.0")
@@ -303,28 +273,55 @@ class KasauXSSAdvancedTester:
         self.log("Getting base response for comparison...")
         self.get_base_response()
         
-        # Fill the test queue
-        for param in self.params:
-            for payload in self.payloads:
-                self.test_queue.put((param, payload))
-        
-        # Start worker threads
-        start_time = time.time()
+        # Run tests with ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(self.worker) for _ in range(self.max_workers)]
+            futures = []
+            
+            for param in self.params:
+                for payload in self.payloads:
+                    futures.append(executor.submit(self.test_param_payload, param, payload))
             
             # Monitor progress
-            while self.completed_tests < self.total_tests:
-                time.sleep(0.5)
-                if self.progress_callback:
-                    progress = (self.completed_tests / self.total_tests) * 100
-                    self.progress_callback(progress)
+            for future in as_completed(futures):
+                self.completed_tests += 1
+                progress = (self.completed_tests / self.total_tests) * 100
+                if self.completed_tests % 10 == 0:  # Update progress every 10 tests
+                    self.log(f"Progress: {progress:.1f}% ({self.completed_tests}/{self.total_tests})", "\033[94m")
         
         # Generate final report
-        test_duration = time.time() - start_time
+        test_duration = time.time() - self.start_time
         self.log(f"\nCompleted {self.total_tests} tests in {test_duration:.2f} seconds")
         self.log(f"Average speed: {self.total_tests/max(test_duration, 0.1):.1f} tests/second")
         self.generate_report()
+
+    def calculate_risk_score(self, vulnerability):
+        """Calculate a risk score (1-10) for a vulnerability"""
+        score = 5  # Base score
+        
+        # Increase score based on context
+        contexts = vulnerability['contexts']
+        if any("script tag" in c.lower() for c in contexts):
+            score += 3
+        elif any("javascript" in c.lower() for c in contexts):
+            score += 2
+        elif any("attribute" in c.lower() for c in contexts):
+            score += 1
+            
+        # Increase score based on reflection type
+        reflection = vulnerability['reflection_type'].lower()
+        if "direct" in reflection:
+            score += 2
+        elif "partial" in reflection:
+            score += 1
+            
+        # Adjust based on response characteristics
+        content_type = vulnerability['content_type'].lower()
+        if "text/html" in content_type:
+            score += 1
+        elif "application/json" in content_type:
+            score -= 1
+            
+        return min(max(score, 1), 10)  # Clamp between 1 and 10
 
     def generate_report(self):
         """Generate comprehensive vulnerability report with risk scoring"""
@@ -388,230 +385,56 @@ class KasauXSSAdvancedTester:
         self.log(f"\nTest completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self.log("="*80)
 
-    def calculate_risk_score(self, vulnerability):
-        """Calculate a risk score (1-10) for a vulnerability"""
-        score = 5  # Base score
-        
-        # Increase score based on context
-        contexts = vulnerability['contexts']
-        if any("script tag" in c.lower() for c in contexts):
-            score += 3
-        elif any("javascript" in c.lower() for c in contexts):
-            score += 2
-        elif any("attribute" in c.lower() for c in contexts):
-            score += 1
-            
-        # Increase score based on reflection type
-        reflection = vulnerability['reflection_type'].lower()
-        if "direct" in reflection:
-            score += 2
-        elif "partial" in reflection:
-            score += 1
-            
-        # Adjust based on response characteristics
-        content_type = vulnerability['content_type'].lower()
-        if "text/html" in content_type:
-            score += 1
-        elif "application/json" in content_type:
-            score -= 1
-            
-        return min(max(score, 1), 10)  # Clamp between 1 and 10
-
-def run_gui():
-    def update_progress(value):
-        progress_var.set(value)
-        progress_label.config(text=f"Progress: {value:.1f}%")
-        root.update_idletasks()
-
-    def on_test_click():
-        url = url_entry.get().strip()
-        params = params_entry.get().strip()
-        custom_payloads = payloads_text.get("1.0", tk.END).strip()
-        workers = workers_entry.get()
-
-        if not url or not params:
-            messagebox.showwarning("Input Error", "URL and Parameters are required!")
-            return
-
-        # Validate URL
+def main():
+    parser = argparse.ArgumentParser(
+        description="Kasau XSS Advanced Penetration Testing Tool v3.0",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("url", help="Target URL to test")
+    parser.add_argument("params", help="Comma-separated list of parameters to test")
+    parser.add_argument("-w", "--workers", type=int, default=15,
+                      help="Number of concurrent workers (threads)")
+    parser.add_argument("-t", "--timeout", type=int, default=8,
+                      help="Request timeout in seconds")
+    parser.add_argument("-p", "--payloads", type=str,
+                      help="File containing custom payloads (one per line)")
+    
+    args = parser.parse_args()
+    
+    # Load custom payloads if specified
+    payloads = None
+    if args.payloads:
         try:
-            parsed_url = urlparse(url)
-            if not parsed_url.scheme or not parsed_url.netloc:
-                messagebox.showwarning("Input Error", "Please enter a valid URL with protocol (http/https)")
-                return
-        except Exception:
-            messagebox.showwarning("Input Error", "Invalid URL format")
-            return
-
-        param_list = [p.strip() for p in params.split(",") if p.strip()]
-        if not param_list:
-            messagebox.showwarning("Input Error", "Please enter at least one parameter.")
-            return
-
-        # Parse custom payloads
-        payload_list = None
-        if custom_payloads:
-            payload_list = [pl.strip() for pl in custom_payloads.split("\n") if pl.strip()]
-
-        # Validate workers count
-        try:
-            workers_count = int(workers) if workers else 15
-            workers_count = max(1, min(50, workers_count))  # Limit between 1-50
-        except ValueError:
-            messagebox.showwarning("Input Error", "Worker count must be a number")
-            return
-
-        # Clear output and reset progress
-        output_text.config(state='normal')
-        output_text.delete('1.0', tk.END)
-        output_text.config(state='disabled')
-        progress_var.set(0)
-        progress_label.config(text="Progress: 0.0%")
-
-        # Disable test button during testing
-        test_btn.config(state='disabled', text='Testing...')
-
-        def test_complete():
-            test_btn.config(state='normal', text='Start Penetration Test')
-
-        def run_test():
-            try:
-                tester = KasauXSSAdvancedTester(
-                    url, 
-                    param_list, 
-                    payload_list, 
-                    output_text, 
-                    update_progress
-                )
-                tester.max_workers = workers_count
-                tester.run_tests()
-            except Exception as e:
-                output_text.config(state='normal')
-                output_text.insert(tk.END, f"\n[ERROR] {str(e)}\n")
-                output_text.config(state='disabled')
-            finally:
-                root.after(0, test_complete)
-
-        threading.Thread(target=run_test, daemon=True).start()
-
-    def load_payloads_example():
-        example_payloads = """<script>alert('XSS-Kasau')</script>
-<img src=x onerror=alert('XSS-Kasau')>
-<svg/onload=alert('XSS-Kasau')>
-'\"><script>alert('XSS')</script>
-<iframe src='javascript:alert("XSS-Kasau")'>
-<details open ontoggle=alert('XSS-Kasau')>"""
-        payloads_text.delete("1.0", tk.END)
-        payloads_text.insert("1.0", example_payloads)
-
-    # Main window setup
-    root = tk.Tk()
-    root.title("Kasau XSS Advanced Penetration Testing Tool v3.0")
-    root.geometry("1000x800")
-    root.configure(bg='#2b2b2b')
-
-    # Styling
-    style = ttk.Style()
-    style.theme_use('clam')
-    style.configure('TFrame', background='#2b2b2b')
-    style.configure('Title.TLabel', font=('Arial', 14, 'bold'), foreground='#ffffff', background='#2b2b2b')
-    style.configure('Header.TLabel', font=('Arial', 10, 'bold'), foreground='#ffffff', background='#2b2b2b')
-    style.configure('TButton', font=('Arial', 10), padding=5)
-    style.configure('TEntry', font=('Consolas', 10))
-    style.configure('TCombobox', font=('Consolas', 10))
-
-    # Header
-    header_frame = ttk.Frame(root)
-    header_frame.pack(fill='x', padx=10, pady=10)
+            with open(args.payloads, 'r') as f:
+                payloads = [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            print(f"Error loading payloads file: {str(e)}")
+            sys.exit(1)
     
-    title_label = ttk.Label(header_frame, text="KASAU XSS ADVANCED PENETRATION TESTING TOOL", style='Title.TLabel')
-    title_label.pack()
+    # Parse parameters
+    param_list = [p.strip() for p in args.params.split(",") if p.strip()]
     
-    version_label = ttk.Label(header_frame, text="Version 3.0 - Created by Kasau (https://kasau.dev)", style='Header.TLabel')
-    version_label.pack()
-
-    # Input frame
-    input_frame = ttk.Frame(root)
-    input_frame.pack(fill='x', padx=10, pady=5)
-
-    # URL input
-    ttk.Label(input_frame, text="Target URL:", style='Header.TLabel').pack(anchor='w', pady=(5,0))
-    url_entry = ttk.Entry(input_frame, width=100)
-    url_entry.pack(fill='x', pady=(2,5))
-    url_entry.insert(0, "https://example.com/search.php")
-
-    # Parameters input
-    ttk.Label(input_frame, text="Parameters to test (comma-separated):", style='Header.TLabel').pack(anchor='w', pady=(5,0))
-    params_entry = ttk.Entry(input_frame, width=100)
-    params_entry.pack(fill='x', pady=(2,5))
-    params_entry.insert(0, "q,search,query,input")
-
-    # Workers input
-    ttk.Label(input_frame, text="Concurrent workers (1-50):", style='Header.TLabel').pack(anchor='w', pady=(5,0))
-    workers_entry = ttk.Entry(input_frame, width=10)
-    workers_entry.pack(anchor='w', pady=(2,5))
-    workers_entry.insert(0, "15")
-
-    # Custom payloads input
-    payload_frame = ttk.Frame(input_frame)
-    payload_frame.pack(fill='x', pady=5)
+    # Validate URL
+    try:
+        parsed_url = urlparse(args.url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            print("Error: Please enter a valid URL with protocol (http/https)")
+            sys.exit(1)
+    except Exception:
+        print("Error: Invalid URL format")
+        sys.exit(1)
     
-    ttk.Label(payload_frame, text="Custom Payloads (one per line, optional - leave empty for default set):", style='Header.TLabel').pack(anchor='w')
+    # Run the scanner
+    tester = KasauXSSAdvancedTester(
+        args.url,
+        param_list,
+        payloads,
+        workers=args.workers,
+        timeout=args.timeout
+    )
     
-    button_frame = ttk.Frame(payload_frame)
-    button_frame.pack(fill='x')
-    
-    load_example_btn = ttk.Button(button_frame, text="Load Example Payloads", command=load_payloads_example)
-    load_example_btn.pack(side='right', padx=(5,0))
-    
-    payloads_text = scrolledtext.ScrolledText(payload_frame, height=6, font=('Consolas', 9), 
-                                            bg='#1e1e1e', fg='#ffffff', insertbackground='white')
-    payloads_text.pack(fill='x', pady=(5,0))
-
-    # Control frame
-    control_frame = ttk.Frame(root)
-    control_frame.pack(fill='x', padx=10, pady=10)
-
-    test_btn = ttk.Button(control_frame, text="Start Penetration Test", command=on_test_click,
-                         style='TButton')
-    test_btn.pack(side='left')
-
-    # Progress bar
-    progress_var = tk.DoubleVar()
-    progress_bar = ttk.Progressbar(control_frame, variable=progress_var, maximum=100, length=300)
-    progress_bar.pack(side='right', padx=(10,0))
-    
-    progress_label = ttk.Label(control_frame, text="Progress: 0.0%", style='Header.TLabel')
-    progress_label.pack(side='right', padx=(10,5))
-
-    # Output area
-    output_frame = ttk.Frame(root)
-    output_frame.pack(fill='both', expand=True, padx=10, pady=5)
-    
-    ttk.Label(output_frame, text="Test Output:", style='Header.TLabel').pack(anchor='w')
-    
-    output_text = scrolledtext.ScrolledText(output_frame, state='disabled', wrap=tk.WORD, 
-                                          font=('Consolas', 9), bg='#1e1e1e', fg='#00ff00',
-                                          insertbackground='white')
-    output_text.pack(fill='both', expand=True)
-
-    # Footer
-    footer_frame = ttk.Frame(root)
-    footer_frame.pack(fill='x', side='bottom')
-    
-    footer_label = ttk.Label(footer_frame, 
-                           text="⚠️  FOR AUTHORIZED PENETRATION TESTING ONLY - Created by Kasau", 
-                           style='Header.TLabel')
-    footer_label.pack(pady=5)
-
-    # Warning dialog on startup
-    messagebox.showwarning("Legal Notice", 
-                          "This tool is for authorized penetration testing only.\n\n"
-                          "Only use this tool on systems you own or have explicit written permission to test.\n\n"
-                          "Unauthorized testing may violate local laws and regulations.\n\n"
-                          "The creator (Kasau) is not responsible for misuse of this tool.")
-
-    root.mainloop()
+    tester.run_tests()
 
 if __name__ == "__main__":
-    run_gui()
+    import threading  # Added at the top would cause SyntaxError due to the class definition
+    main()
