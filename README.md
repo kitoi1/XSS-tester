@@ -1,22 +1,26 @@
-# XSS-tester
-
 # Kasau XSS Advanced Tester
 
 ![GitHub](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.7%2B-blue)
 
-Professional-grade XSS vulnerability scanner for authorized penetration testing.
+🔒 **Professional-grade XSS vulnerability scanner** designed for ethical hackers, bug bounty hunters, and penetration testers. It supports both **GUI and CLI**, uses **multi-threading for speed**, and features **smart reflection detection** for accurate XSS discovery.
 
-## Features
+---
 
-- Advanced payload testing with context detection
-- Multi-threaded scanning
-- Comprehensive reporting
-- Custom payload support
-- GUI and CLI interfaces
-- Smart reflection detection
+## 🚀 Features
 
-## Installation
+- ✅ **Advanced Payload Injection**
+- ⚙️ **Context-aware reflection detection**
+- 🚀 **Multi-threaded Scanning Engine**
+- 📄 **Custom & Built-in Payload Support**
+- 🧠 **Smart Input Field Detection (DOM/Params)**
+- 💡 **Supports GUI (Tkinter) and CLI**
+- 📁 **HTML Report Generation**
+- 🔌 **Modular design — easy to extend**
+
+---
+
+## 📦 Installation
 
 ```bash
 git clone https://github.com/kasau/kasau-xss-tester.git
